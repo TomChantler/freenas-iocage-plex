@@ -14,9 +14,10 @@ INTERFACE="vnet0"
 # BUGBUG In FreeNAS 11.3-U1, a 'plex' jail would not install pkg; any other name would
 # This was caused by the presence of another jail that had been named 'plex' at one
 # point. Might be CPE or FreeNAS. Since this script is used to migrate data off an
-# old plugin, side-stepping issue by naming jail 'pms'.  
+# old plugin, side-stepping issue by naming jail 'pms'.
 JAIL_NAME="pms"
 USE_BETA=0
+USE_DHCP=0
 USE_BASEJAIL="-b"
 PLEXPKG=""
 HW_TRANSCODE_RULESET="10"
@@ -39,7 +40,7 @@ createrulesetscript() {
     echo "This script only knows how to enable hardware transcode in FreeNAS 11.3 and TrueNAS 12.0"
     return 1
   fi
-  IGPU_MODEL=$(lspci | grep Intel | grep Graphics) 
+  IGPU_MODEL=$(lspci | grep Intel | grep Graphics)
   if [ ! -z "${IGPU_MODEL}" ] ; then
     echo "Found Intel GPU model " ${IGPU_MODEL} ", this bodes well."
     if [ -z "$(kldstat | grep i915kms.ko)" ] ; then
@@ -54,9 +55,9 @@ createrulesetscript() {
     echo "If you know you have supported hardware, please send the authors of this script"
     echo "the output of \"lspci\" on your system, and we'll improve the detection logic."
     return 1
-  fi 
+  fi
   if [ ! -f $2 ] ; then
-    echo "Creating script file" $2 
+    echo "Creating script file" $2
     cat > $2 <<EOF
 #!/bin/sh
 
@@ -110,17 +111,21 @@ if ! [ -e "${SCRIPTPATH}"/plex-config ]; then
 fi
 
 # Check that necessary variables were set by plex-config
-if [ -z "${JAIL_IP}" ]; then
-  echo 'Configuration error: JAIL_IP must be set'
-  exit 1
-fi
-if [ -z "${DEFAULT_GW_IP}" ]; then
-  echo 'Configuration error: DEFAULT_GW_IP must be set'
-  exit 1
-fi
-if [ -z "${NETMASK}" ]; then
-  echo 'Netmask not set, defaulting to /24 (255.255.255.0)'
-  NETMASK="24"
+if [ ${USE_DHCP} -eq 1 ]; then
+  echo 'Using DHCP, so will not check JAIL_IP, DEFAULT_GW_IP or NETMASK'
+else
+  if [ -z "${JAIL_IP}" ]; then
+    echo 'Configuration error: JAIL_IP must be set'
+    exit 1
+  fi
+  if [ -z "${DEFAULT_GW_IP}" ]; then
+    echo 'Configuration error: DEFAULT_GW_IP must be set'
+    exit 1
+  fi
+  if [ -z "${NETMASK}" ]; then
+    echo 'Netmask not set, defaulting to /24 (255.255.255.0)'
+    NETMASK="24"
+  fi
 fi
 
 if [ -z "${POOL_PATH}" ]; then
@@ -155,18 +160,25 @@ else
 fi
 
 if [ $USE_BETA -eq 1 ]; then
-	echo "Using beta-release plexmediaserver code"
-	PLEXPKG="plexmediaserver-plexpass"
+        echo "Using beta-release plexmediaserver code"
+        PLEXPKG="plexmediaserver-plexpass"
 else
-	echo "Using stable-release plexmediaserver code"
-	PLEXPKG="plexmediaserver"
+        echo "Using stable-release plexmediaserver code"
+        PLEXPKG="plexmediaserver"
 fi
 # Create jail
 echo "Creating jail "${JAIL_NAME}". This may take a minute, please be patient."
-if ! iocage create --name "${JAIL_NAME}" -r "${RELEASE}" ip4_addr="${INTERFACE}|${JAIL_IP}/${NETMASK}" defaultrouter="${DEFAULT_GW_IP}" boot="on" host_hostname="${JAIL_NAME}" vnet="${VNET}" ${USE_BASEJAIL} ${DEVFS_RULESET}
+if [ $USE_DHCP -eq 1 ]; then
+  CREATE_JAIL_COMMAND="iocage create --name '"${JAIL_NAME}"' -r '"${RELEASE}"' boot='"on"' dhcp='"on"' host_hostname='"${JAIL_NAME}"' ${USE_BASEJAIL} ${DEVFS_RULESET}"
+else
+  CREATE_JAIL_COMMAND="iocage create --name '"${JAIL_NAME}"' -r '"${RELEASE}"' ip4_addr='"${INTERFACE}|${JAIL_IP}/${NETMASK}"' defaultrouter='"${DEFAULT_GW_IP}"' boot='"on"' host_hostname='"${JAIL_NAME}"' vnet='"${VNET}"' ${USE_BASEJAIL} ${DEVFS_RULESET}"
+fi
+echo "Am using this command: "${CREATE_JAIL_COMMAND}""
+echo "So let's see what happens..."
+if ! eval $CREATE_JAIL_COMMAND
 then
-	echo "Failed to create jail"
-	exit 1
+        echo "Failed to create jail"
+        exit 1
 fi
 
 iocage exec "${JAIL_NAME}" mkdir /config
@@ -184,10 +196,10 @@ fi
 iocage exec "${JAIL_NAME}" cp /configs/pkg.conf /usr/local/etc
 if ! iocage exec "${JAIL_NAME}" pkg install ${PLEXPKG}
 then
-	echo "Failed to install ${PLEXPKG} package"
-	iocage stop "${JAIL_NAME}"
-	iocage destroy -f "${JAIL_NAME}"
-	exit 1
+        echo "Failed to install ${PLEXPKG} package"
+        iocage stop "${JAIL_NAME}"
+        iocage destroy -f "${JAIL_NAME}"
+        exit 1
 fi
 iocage exec "${JAIL_NAME}" rm /usr/local/etc/pkg.conf
 if [ $USE_BETA -eq 1 ]; then
@@ -219,8 +231,9 @@ else
 fi
 
 echo "Installation Complete!"
-if [ -z "${PLEX_MEDIA_PATH}" ]; then 
+if [ -z "${PLEX_MEDIA_PATH}" ]; then
   echo "Mount your media folder into the jail, then start the jail."
 fi
 echo "Log in and configure your server by browsing to:"
+# Need to pick up IP address from iocage when using DHCP...
 echo "http://$JAIL_IP:32400/web"
